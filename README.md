@@ -53,7 +53,9 @@ npm install
 npm run build
 ```
 
-## Usage with Claude Code
+## Usage
+
+### Option 1: Local (stdio mode)
 
 Add to your Claude Code MCP settings (`~/.claude/claude_desktop_config.json` or project `.mcp.json`):
 
@@ -67,6 +69,110 @@ Add to your Claude Code MCP settings (`~/.claude/claude_desktop_config.json` or 
   }
 }
 ```
+
+### Option 2: Remote HTTP Server
+
+Run the server in HTTP mode so clients can connect via URL:
+
+```bash
+# Start HTTP server on port 3000
+node dist/index.js --http --port=3000 --host=0.0.0.0
+
+# With API key authentication
+node dist/index.js --http --port=3000 --host=0.0.0.0 --api-key=your-secret-key
+```
+
+Clients connect using the remote URL in their MCP config:
+
+```json
+{
+  "mcpServers": {
+    "splynx-addons": {
+      "type": "url",
+      "url": "https://mcp-addons.splynx.com/mcp",
+      "headers": {
+        "Authorization": "Bearer your-secret-key"
+      }
+    }
+  }
+}
+```
+
+### Option 3: Docker Deployment
+
+```bash
+# Build
+docker build -t splynx-addons-mcp .
+
+# Run (no auth)
+docker run -p 3000:3000 splynx-addons-mcp
+
+# Run with API key
+docker run -p 3000:3000 splynx-addons-mcp \
+  node dist/index.js --http --port=3000 --host=0.0.0.0 --api-key=your-secret-key
+```
+
+### Deploying to mcp-addons.splynx.com
+
+1. **Docker + Nginx reverse proxy** (recommended):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name mcp-addons.splynx.com;
+
+    ssl_certificate     /etc/letsencrypt/live/mcp-addons.splynx.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mcp-addons.splynx.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;         # Required for SSE streaming
+        proxy_cache off;
+        proxy_read_timeout 86400s;   # Long timeout for SSE connections
+    }
+}
+```
+
+2. **Start the server** (use `--api-key` in production):
+
+```bash
+docker run -d --name splynx-mcp --restart always \
+  -p 127.0.0.1:3000:3000 \
+  splynx-addons-mcp \
+  node dist/index.js --http --port=3000 --host=0.0.0.0 --api-key=YOUR_SECRET_KEY
+```
+
+3. **Clients connect with**:
+
+```json
+{
+  "mcpServers": {
+    "splynx-addons": {
+      "type": "url",
+      "url": "https://mcp-addons.splynx.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_SECRET_KEY"
+      }
+    }
+  }
+}
+```
+
+### Health Check
+
+When running in HTTP mode, a health endpoint is available:
+
+```bash
+curl https://mcp-addons.splynx.com/health
+# {"status":"ok","server":"splynx-addons-mcp","version":"1.0.0"}
+```
+
+---
 
 Then in Claude Code you can:
 - Ask to create a new Splynx addon and the AI will use the scaffold tool
