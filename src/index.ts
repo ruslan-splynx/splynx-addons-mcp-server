@@ -22,18 +22,15 @@ async function main() {
   const args = process.argv.slice(2);
 
   if (args.includes("--http")) {
-    // HTTP mode - Streamable HTTP transport for remote access
     const { startHttpServer } = await import("./http.js");
     const port = parseInt(
       args.find((a) => a.startsWith("--port="))?.split("=")[1] || "3000",
       10
     );
     const host = args.find((a) => a.startsWith("--host="))?.split("=")[1] || "0.0.0.0";
-    const apiKey = args.find((a) => a.startsWith("--api-key="))?.split("=")[1];
 
-    await startHttpServer(createServer, { port, host, apiKey });
+    await startHttpServer(createServer, { port, host });
   } else {
-    // Default: stdio mode for local usage
     const { StdioServerTransport } = await import(
       "@modelcontextprotocol/sdk/server/stdio.js"
     );

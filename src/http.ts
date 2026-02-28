@@ -1,4 +1,4 @@
-import express, { Request, Response, NextFunction } from "express";
+import express, { Request, Response } from "express";
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -6,14 +6,13 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 interface HttpServerOptions {
   port: number;
   host: string;
-  apiKey?: string;
 }
 
 export async function startHttpServer(
   createServer: () => McpServer,
   options: HttpServerOptions
 ): Promise<void> {
-  const { port, host, apiKey } = options;
+  const { port, host } = options;
   const app = express();
 
   app.use(express.json());
@@ -23,28 +22,6 @@ export async function startHttpServer(
     res.json({ status: "ok", server: "splynx-addons-mcp", version: "1.0.0" });
   });
 
-  // Optional API key authentication middleware
-  if (apiKey) {
-    app.use("/mcp", (req: Request, res: Response, next: NextFunction) => {
-      const authHeader = req.headers.authorization;
-      if (!authHeader) {
-        res.status(401).json({ error: "Authorization header required" });
-        return;
-      }
-
-      const token = authHeader.startsWith("Bearer ")
-        ? authHeader.slice(7)
-        : authHeader;
-
-      if (token !== apiKey) {
-        res.status(403).json({ error: "Invalid API key" });
-        return;
-      }
-
-      next();
-    });
-  }
-
   // Track active transports by session ID
   const transports = new Map<string, StreamableHTTPServerTransport>();
 
@@ -53,14 +30,12 @@ export async function startHttpServer(
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
     if (sessionId && transports.has(sessionId)) {
-      // Existing session
       const transport = transports.get(sessionId)!;
       await transport.handleRequest(req, res, req.body);
       return;
     }
 
     if (sessionId && !transports.has(sessionId)) {
-      // Invalid session
       res.status(404).json({
         jsonrpc: "2.0",
         error: { code: -32000, message: "Session not found" },
@@ -69,7 +44,7 @@ export async function startHttpServer(
       return;
     }
 
-    // New session - create server + transport
+    // New session
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
     });
@@ -123,11 +98,6 @@ export async function startHttpServer(
     console.log(`Splynx Addons MCP Server (HTTP) running at http://${host}:${port}`);
     console.log(`MCP endpoint: http://${host}:${port}/mcp`);
     console.log(`Health check: http://${host}:${port}/health`);
-    if (apiKey) {
-      console.log(`Authentication: Bearer token required`);
-    } else {
-      console.log(`Authentication: NONE (use --api-key=<key> to enable)`);
-    }
   });
 
   // Graceful shutdown

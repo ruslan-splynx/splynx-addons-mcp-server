@@ -75,11 +75,7 @@ Add to your Claude Code MCP settings (`~/.claude/claude_desktop_config.json` or 
 Run the server in HTTP mode so clients can connect via URL:
 
 ```bash
-# Start HTTP server on port 3000
 node dist/index.js --http --port=3000 --host=0.0.0.0
-
-# With API key authentication
-node dist/index.js --http --port=3000 --host=0.0.0.0 --api-key=your-secret-key
 ```
 
 Clients connect using the remote URL in their MCP config:
@@ -89,10 +85,7 @@ Clients connect using the remote URL in their MCP config:
   "mcpServers": {
     "splynx-addons": {
       "type": "url",
-      "url": "https://mcp-addons.splynx.com/mcp",
-      "headers": {
-        "Authorization": "Bearer your-secret-key"
-      }
+      "url": "https://mcp-addons.splynx.com/mcp"
     }
   }
 }
@@ -104,17 +97,13 @@ Clients connect using the remote URL in their MCP config:
 # Build
 docker build -t splynx-addons-mcp .
 
-# Run (no auth)
-docker run -p 3000:3000 splynx-addons-mcp
-
-# Run with API key
-docker run -p 3000:3000 splynx-addons-mcp \
-  node dist/index.js --http --port=3000 --host=0.0.0.0 --api-key=your-secret-key
+# Run
+docker run -d --name splynx-mcp --restart always -p 3000:3000 splynx-addons-mcp
 ```
 
 ### Deploying to mcp-addons.splynx.com
 
-1. **Docker + Nginx reverse proxy** (recommended):
+Nginx reverse proxy config:
 
 ```nginx
 server {
@@ -131,41 +120,14 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_buffering off;         # Required for SSE streaming
+        proxy_buffering off;
         proxy_cache off;
-        proxy_read_timeout 86400s;   # Long timeout for SSE connections
+        proxy_read_timeout 86400s;
     }
-}
-```
-
-2. **Start the server** (use `--api-key` in production):
-
-```bash
-docker run -d --name splynx-mcp --restart always \
-  -p 127.0.0.1:3000:3000 \
-  splynx-addons-mcp \
-  node dist/index.js --http --port=3000 --host=0.0.0.0 --api-key=YOUR_SECRET_KEY
-```
-
-3. **Clients connect with**:
-
-```json
-{
-  "mcpServers": {
-    "splynx-addons": {
-      "type": "url",
-      "url": "https://mcp-addons.splynx.com/mcp",
-      "headers": {
-        "Authorization": "Bearer YOUR_SECRET_KEY"
-      }
-    }
-  }
 }
 ```
 
 ### Health Check
-
-When running in HTTP mode, a health endpoint is available:
 
 ```bash
 curl https://mcp-addons.splynx.com/health
