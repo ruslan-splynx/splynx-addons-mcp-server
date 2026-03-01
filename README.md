@@ -4,7 +4,7 @@ An MCP (Model Context Protocol) server that provides comprehensive tools, docume
 
 ## Features
 
-### Resources (16 documentation topics)
+### Resources (19 documentation topics)
 Complete Splynx addon development reference embedded directly in the server:
 - **Addon Architecture** - Directory structure, key concepts, lifecycle
 - **InstallController** - API permissions, entry points, hooks, additional fields
@@ -22,6 +22,9 @@ Complete Splynx addon development reference embedded directly in the server:
 - **User Authorization** - Admin, customer, and multi-identity auth
 - **Splynx API** - REST API v2.0 reference (authentication, endpoints, filtering)
 - **Splynx Platform** - Complete platform overview (all modules)
+- **Accounting Addon** - OAuth2 sync engine, entity pairing, rate limiting, PID locking (QuickBooks/Xero patterns)
+- **E-Invoicing Addon** - Government tax authority submission, tracker pattern, XML generation, hash chaining, QR codes (AADE/Verifactu patterns)
+- **Advanced Patterns** - Console-only addons, ActionInterface, dual DB, repository caching, bank import, fee registry, cron pipelines, commission engines
 
 ### Tools (9 code generators)
 - **scaffold_addon** - Generate a complete addon skeleton with all files
@@ -34,8 +37,10 @@ Complete Splynx addon development reference embedded directly in the server:
 - **generate_web_config** - Generate config/web.php
 - **generate_migration** - Generate database migrations
 
-### Prompts (7 guided workflows)
-- **create_addon** - Full addon creation from scratch
+### Prompts (9 guided workflows)
+- **create_addon** - Full addon creation from scratch (general, payment, monitoring, integration, accounting, e-invoicing, reporting, notification)
+- **create_accounting_addon** - Guided accounting/ERP integration (OAuth2, sync engine, entity pairing)
+- **create_einvoicing_addon** - Guided e-invoicing addon (government API, XML, certificates)
 - **add_hook_handler** - Add event handling to existing addon
 - **add_payment_gateway** - Integrate a payment gateway
 - **add_custom_dataset** - Create new entity types
