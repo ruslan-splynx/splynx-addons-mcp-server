@@ -16,6 +16,9 @@ import {
   USER_AUTHORIZATION_GUIDE,
   SPLYNX_API_REFERENCE,
   SPLYNX_PLATFORM_OVERVIEW,
+  ACCOUNTING_ADDON_GUIDE,
+  E_INVOICING_ADDON_GUIDE,
+  ADVANCED_PATTERNS_GUIDE,
 } from "./knowledge.js";
 
 export function registerResources(server: McpServer): void {
@@ -317,6 +320,63 @@ export function registerResources(server: McpServer): void {
         {
           uri: "splynx://docs/splynx-platform",
           text: SPLYNX_PLATFORM_OVERVIEW,
+          mimeType: "text/markdown",
+        },
+      ],
+    })
+  );
+
+  server.resource(
+    "accounting-addon",
+    "splynx://docs/accounting-addon",
+    {
+      description:
+        "Accounting integration addon guide: OAuth2 flow, sync engine, entity pairing, rate limiting, PID locking, cron sync, Bootstrap DI, three-layer data model (QuickBooks/Xero patterns)",
+      mimeType: "text/markdown",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: "splynx://docs/accounting-addon",
+          text: ACCOUNTING_ADDON_GUIDE,
+          mimeType: "text/markdown",
+        },
+      ],
+    })
+  );
+
+  server.resource(
+    "e-invoicing-addon",
+    "splynx://docs/e-invoicing-addon",
+    {
+      description:
+        "E-invoicing addon guide: government tax authority submission, tracker pattern, XML document generation, hash chaining, QR codes, invoice type mapping, certificate management (AADE Greece/Verifactu Spain patterns)",
+      mimeType: "text/markdown",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: "splynx://docs/e-invoicing-addon",
+          text: E_INVOICING_ADDON_GUIDE,
+          mimeType: "text/markdown",
+        },
+      ],
+    })
+  );
+
+  server.resource(
+    "advanced-patterns",
+    "splynx://docs/advanced-patterns",
+    {
+      description:
+        "Advanced addon patterns: console-only addons, ActionInterface, dual database (SQLite+MySQL), repository caching, chunked API loading, fee type registry, bank statement import (PULL), cron pipelines, cross-module fields, partner-aware config, commission engines, DataTables AJAX, rate limiting",
+      mimeType: "text/markdown",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: "splynx://docs/advanced-patterns",
+          text: ADVANCED_PATTERNS_GUIDE,
           mimeType: "text/markdown",
         },
       ],

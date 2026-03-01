@@ -2227,3 +2227,1743 @@ Addons can integrate with ANY of the above modules through:
 - jQuery
 - Twig templating
 `;
+
+// ---------------------------------------------------------------------------
+// ACCOUNTING / INTEGRATION ADDON GUIDE
+// ---------------------------------------------------------------------------
+export const ACCOUNTING_ADDON_GUIDE = `# Accounting & External Integration Addon Guide
+
+This guide covers advanced patterns used by accounting integration addons (QuickBooks, Xero, etc.)
+that synchronize data bidirectionally between Splynx and external accounting platforms.
+
+## Overview
+
+An accounting addon is significantly more complex than a basic addon. It involves:
+- OAuth2 authentication with external APIs
+- Bidirectional data synchronization (customers, invoices, credit notes, payments)
+- Entity pairing (mapping Splynx entities to external entities)
+- API rate limiting
+- Process locking (PID restrictions)
+- Cron-based background sync
+- Complex DI container wiring (Bootstrap class)
+- License checking
+- Multi-log targets
+- Build/packaging with ionCube
+
+## Directory Structure (Accounting Addon)
+
+\`\`\`
+my-accounting-addon/
+├── assets/AppAsset.php
+├── base/
+│   └── Bootstrap.php                # DI container wiring (BootstrapInterface)
+├── build/
+│   ├── config.php                   # Build metadata, conflicts, symlink
+│   ├── sync.php                     # Release script
+│   └── package-files/
+│       └── etc/
+│           ├── cron.d/              # Cron job definition
+│           └── nginx/sites-available/  # Nginx location config
+├── commands/
+│   ├── BaseCommandController.php    # Shared console command base
+│   ├── InstallController.php        # Install/uninstall with accounting init
+│   ├── SyncController.php           # Cron-driven sync orchestrator
+│   └── ToolsController.php          # Manual sync/reset/migration tools
+├── components/
+│   ├── LicenseChecker.php           # ionCube license validation
+│   ├── ValidateConfig.php           # Pre-sync config validation
+│   └── <provider>/                  # e.g. quickbooks/ or xero/
+│       ├── AccountingApiCaller.php  # API proxy with rate limiting
+│       ├── exceptions/
+│       │   ├── Exception.php
+│       │   ├── ApiAuthException.php      # HTTP 401
+│       │   ├── ApiCallException.php      # General API errors
+│       │   └── ApiCallLimitException.php # HTTP 429
+│       └── oauth2/
+│           ├── AuthService.php      # OAuth2 token management
+│           └── AccessToken.php      # Token value object
+├── config/
+│   ├── common.php                   # Shared web+console config with Bootstrap
+│   ├── config.json                  # Settings: api, accounting_api, sync, cron blocks
+│   ├── console.php                  # Console config with license check
+│   ├── db.php                       # SQLite DB connection
+│   ├── url_rules.php
+│   ├── validator_launch_time.php    # Custom cron time validator
+│   └── web.php                      # Web config with license check
+├── controllers/
+│   ├── AuthController.php           # OAuth2 connect/disconnect flow
+│   ├── ConfigController.php         # Category/tax/bank mapping UI
+│   ├── ManualPairingCustomersController.php  # Manual customer pairing
+│   ├── SiteController.php           # Dashboard, sync trigger, log tailing
+│   └── ToolsController.php          # Reset, migration tools
+├── defaults/
+│   └── etc/cron.d/                  # Default cron for deployment
+├── helpers/
+│   ├── AuthTokenHelper.php          # Redis-based OAuth token storage
+│   ├── CompareHelper.php            # Float comparison for financials
+│   ├── ConfigHelper.php             # Addon config read/write
+│   └── TailHelper.php              # Log file tailing for real-time UI
+├── migrations/                      # SQLite tables for pair/limit/pid data
+├── models/
+│   ├── accounting/                  # Accounting status tracking
+│   │   ├── BaseAccounting.php       # Abstract: status, modified, soft-delete
+│   │   ├── BaseAccountingMapping.php # Abstract: reference data mapping
+│   │   ├── AccountingCustomers.php
+│   │   ├── AccountingInvoices.php
+│   │   ├── AccountingPayments.php
+│   │   ├── AccountingCreditNotes.php
+│   │   ├── AccountingCategories.php    # Mapping table
+│   │   ├── AccountingTaxRates.php      # Mapping table
+│   │   ├── AccountingBankAccounts.php  # Mapping table
+│   │   └── config/
+│   │       └── CategoriesMappingForm.php
+│   ├── limit/                       # API rate limiting
+│   │   ├── ApiLimitInterface.php
+│   │   ├── ApiLimit.php             # Per-call tracking
+│   │   ├── ApiLimitCounter.php      # Per-minute/day counter
+│   │   └── ApiLimitService.php      # Composite limiter
+│   ├── pair/                        # Entity pairing (Splynx <-> External)
+│   │   ├── BasePair.php             # Abstract ActiveRecord with change detection
+│   │   ├── PairCustomer.php
+│   │   ├── PairInvoice.php
+│   │   ├── PairPayment.php          # In-memory only (not persisted)
+│   │   ├── PairCreditNote.php
+│   │   ├── PairExpense.php          # In-memory only
+│   │   ├── PairCollection.php       # Batch API request aggregator
+│   │   └── CustomersManualPairing.php
+│   ├── splynx/                      # Splynx entity wrappers
+│   │   ├── Customer.php, Invoice.php, Payment.php, CreditNote.php
+│   │   ├── Tax.php, Partners.php, PaymentsTypes.php
+│   │   ├── BankStatement.php, BankStatementProcess.php
+│   │   └── db/                      # Direct DB models
+│   ├── PidRestriction.php           # Process locking
+│   ├── Resetable.php                # Interface for data reset
+│   └── SyncService.php              # Central sync orchestrator
+├── views/
+│   ├── auth/                        # OAuth form and result
+│   ├── common/menu.twig             # Addon navigation menu
+│   ├── config/                      # Config UI with category mapping
+│   ├── entry-point/                 # JS injection into Splynx core pages
+│   │   ├── categories-config.twig
+│   │   ├── bank-accounts-config.twig
+│   │   ├── tax-rates-config.twig
+│   │   └── check-notification.twig  # Dashboard notification
+│   ├── manual-pairing-customers/    # Manual pairing UI
+│   ├── site/                        # Main dashboard, sync status
+│   └── tools/                       # Tools/reset UI
+├── widgets/Alert.php
+├── web/, yii, composer.json
+\`\`\`
+
+## 1. OAuth2 Flow with External API
+
+Accounting addons use OAuth2 authorization code flow with a remote Splynx auth app:
+
+### Auth Flow
+1. User clicks "Connect" -> addon generates random token, stores in Redis (600s TTL)
+2. User redirected to remote Splynx auth app URL with domain, scope, token
+3. Remote app handles actual OAuth flow with the provider (QuickBooks/Xero)
+4. Remote app POSTs access token data back to addon's \`actionConnectResult()\`
+5. Addon validates Redis token, saves access token to config (encrypted field)
+
+### AuthService Pattern
+\`\`\`php
+class AuthService
+{
+    public function getNewAccessToken($code, $realmOrTenant) { /* Exchange code for tokens */ }
+    public function refreshAccessToken() { /* Refresh expired access token */ }
+    public function isNeedToAuth()    { /* Check if refresh token expired */ }
+    public function isNeedToRefresh() { /* Check if access token expires within 600s */ }
+}
+\`\`\`
+
+### AccessToken Value Object
+\`\`\`php
+// Stored serialized + base64-encoded in config with type "encrypted", "hidden": true
+class AccessToken
+{
+    public $accessToken;
+    public $refreshToken;
+    public $accessTokenExpiresAt;
+    public $refreshTokenExpiresAt;
+    public $realmId; // or tenantId
+
+    public function save()
+    {
+        ConfigHelper::set('oauth2_access_token', base64_encode(serialize($this)));
+    }
+}
+\`\`\`
+
+### AuthController
+\`\`\`php
+class AuthController extends Controller
+{
+    // Disable CSRF for external callback
+    public function beforeAction($action)
+    {
+        if ($action->id === 'connect-result') {
+            $this->enableCsrfValidation = false;
+        }
+        return parent::beforeAction($action);
+    }
+
+    public function actionConnect()
+    {
+        $token = AuthTokenHelper::generateAndStore(); // Redis with 600s TTL
+        $url = ConfigHelper::get('auth_url') . '?' . http_build_query([
+            'splynx_url' => ConfigHelper::get('splynx_domain'),
+            'token' => $token,
+        ]);
+        return $this->redirect($url);
+    }
+
+    public function actionConnectResult()
+    {
+        // Validate Redis token, save access token, sync organizations
+    }
+}
+\`\`\`
+
+### AuthTokenHelper (Redis)
+\`\`\`php
+class AuthTokenHelper
+{
+    public static function generateAndStore(): string
+    {
+        $token = Yii::$app->security->generateRandomString(64);
+        RedisHelper::setex(static::$tokenName, 600, $token);
+        return $token;
+    }
+
+    public static function validate($token): bool
+    {
+        return RedisHelper::get(static::$tokenName) === $token;
+    }
+}
+\`\`\`
+
+## 2. Sync Engine Architecture
+
+The sync engine is the core of an accounting addon, responsible for bidirectional data synchronization.
+
+### Central SyncService
+The SyncService orchestrates all sync operations (typically 2000-3000+ lines):
+
+\`\`\`php
+class SyncService
+{
+    // Customer sync
+    public function addNewCustomers()    { /* Batch export new customers */ }
+    public function updateCustomers()    { /* Batch export modified customers */ }
+
+    // Invoice sync
+    public function addNewInvoices()     { /* Export invoices with category/tax mapping */ }
+    public function updateInvoices()     { /* Update modified invoices */ }
+    public function allocateInvoices()   { /* Link payments to invoices in external system */ }
+
+    // Credit note sync
+    public function addNewCreditNotes()  { /* Export credit notes */ }
+    public function updateCreditNotes()  { /* Update modified credit notes */ }
+    public function allocateCreditNotes() { /* Link credit notes to invoices */ }
+
+    // Payment sync (bidirectional)
+    public function addNewPayments($fromDate)  { /* Import FROM external INTO Splynx */ }
+    public function pushNewPayments()          { /* Export FROM Splynx TO external */ }
+    public function deletePayments()           { /* Sync payment deletions */ }
+
+    // Mapping data sync (reference data from external system)
+    public function syncAccountingCategories()  { /* Pull chart of accounts */ }
+    public function syncAccountingTaxRates()    { /* Pull tax codes */ }
+    public function syncAccountingBankAccounts() { /* Pull bank accounts */ }
+
+    // Manual pairing
+    public function loadAccountingCustomersForManualPairing() { /* Load external customers */ }
+}
+\`\`\`
+
+### SyncController (Console Commands)
+\`\`\`php
+class SyncController extends BaseCommandController
+{
+    private $_pidRestriction;
+    private $_syncService;
+    private $_isInternalCall = false;
+
+    public function beforeAction($action)
+    {
+        // 1. Check PID restriction (prevent concurrent sync)
+        if (!$this->_pidRestriction->updatePid()) {
+            $this->stderr('Another sync process is running');
+            return false;
+        }
+        // 2. Validate config
+        ValidateConfig::checkApi();
+        return parent::beforeAction($action);
+    }
+
+    // Main cron entry point
+    public function actionCron()
+    {
+        if (!$this->isLaunchTime()) return ExitCode::OK;
+
+        if (ConfigHelper::get('cron_sync_customers')) $this->actionCustomers();
+        if (ConfigHelper::get('cron_sync_invoices'))  $this->actionInvoices();
+        if (ConfigHelper::get('cron_sync_credit_notes')) $this->actionCreditNotes();
+        if (ConfigHelper::get('cron_sync_payments')) {
+            switch (ConfigHelper::get('payments_sync_direction')) {
+                case 'import':  $this->actionPayments(); break;
+                case 'export':  $this->actionPushPayments(); break;
+                case 'bidirectional':
+                    $this->actionPushPayments();
+                    $this->actionPayments();
+                    break;
+            }
+        }
+    }
+}
+\`\`\`
+
+### Alternative: Separate Operation Classes Per Entity (Xero Pattern)
+\`\`\`
+models/sync/
+  SyncCustomers.php        -> customers/ExportNew.php, customers/ExportModified.php
+  SyncInvoices.php         -> invoices/ExportNew.php, invoices/ExportModified.php, invoices/ExportAllocations.php
+  SyncCreditNotes.php      -> creditNotes/ExportNew.php, creditNotes/ExportModified.php
+  SyncPayments.php         -> payments/Export.php, payments/Import.php,
+                              payments/ImportPrepayments.php, payments/ImportOverpayments.php,
+                              payments/ExportDeleted.php, payments/ExportAllocations.php
+\`\`\`
+
+Each operation class extends BaseSyncService, uses traits for shared state, and has a \`run()\` method.
+
+## 3. Three-Layer Data Model
+
+### Layer 1: Splynx API Models (models/splynx/)
+Wrappers around Splynx internal API for customers, invoices, payments, etc.
+
+### Layer 2: Accounting Status Tables (models/accounting/)
+Track sync status for each entity. Shared base for all accounting addons.
+
+\`\`\`php
+abstract class BaseAccounting extends ActiveRecord
+{
+    const ACCOUNTING_STATUS_NEW = 0;
+    const ACCOUNTING_STATUS_PENDING = 1;
+    const ACCOUNTING_STATUS_UNKNOWN = 2;
+    const ACCOUNTING_STATUS_ERROR = 3;
+    const ACCOUNTING_STATUS_OK = 4;
+    const BATCH_SIZE = 25;
+
+    // Fields: id, modified, accounting_id, create_date, last_update,
+    //         accounting_status, additional_1/2/3, deleted
+
+    public function getNewRecords()      { /* Status=NEW, not deleted, batch */ }
+    public function getModifiedRecords() { /* Modified=1, status=OK, batch */ }
+    public function success() { $this->accounting_status = self::ACCOUNTING_STATUS_OK; }
+    public function fail()    { $this->accounting_status = self::ACCOUNTING_STATUS_ERROR; }
+}
+\`\`\`
+
+\`\`\`php
+// For reference data (categories, tax rates, bank accounts)
+abstract class BaseAccountingMapping extends ActiveRecord
+{
+    // Fields: id, accounting_id, name, additional_1/2/3, deleted
+    public function reset()    { $this->delete(); }
+    public function resetAll() { static::deleteAll(); }
+}
+\`\`\`
+
+### Layer 3: Pair Tables (models/pair/)
+Store detailed state of each synced record for change detection.
+
+\`\`\`php
+abstract class BasePair extends ActiveRecord implements PairInterface
+{
+    // Fields: id (Splynx ID), accounting_id (external ID), sync_token, timestamps
+
+    abstract public function getPairAttributes(): array;
+
+    public function getPairData(bool $changed = false): array
+    {
+        $currentData = $this->getCurrentDataFromSplynx();
+        if (!$changed) return $currentData;
+        return array_filter($currentData, fn($key) =>
+            $currentData[$key] !== $this->getAttribute($key)
+        );
+    }
+
+    public function isUpdateRequired(): bool { return !empty($this->getPairData(true)); }
+    public function prepareToAdd()    { /* Create external API model */ }
+    public function prepareToUpdate() { /* Update external API model */ }
+}
+\`\`\`
+
+### PairCollection (Batch API Requests)
+\`\`\`php
+class PairCollection implements IteratorAggregate
+{
+    private $_models; // SplObjectStorage
+    public function attach(BasePair $model) { $this->_models->attach($model); }
+    public function sendRequest(string $action, bool $savePair = true)
+    {
+        // Send batch API request, process responses, report per model
+    }
+}
+\`\`\`
+
+## 4. API Rate Limiting
+
+\`\`\`php
+interface ApiLimitInterface
+{
+    const CALL_STATUS_SUCCESS = 1;
+    const CALL_STATUS_ERROR = 2;
+    const CALL_STATUS_LIMIT = 3;
+    public function apiCallAllowed(): bool;
+    public function addApiCall(int $status, string $message = ''): void;
+}
+
+// Composite limiter
+class ApiLimitService implements ApiLimitInterface
+{
+    private $_limits; // SplObjectStorage
+    public function attach(ApiLimitInterface $limit) { $this->_limits->attach($limit); }
+    public function apiCallAllowed(): bool
+    {
+        foreach ($this->_limits as $limit) {
+            if (!$limit->apiCallAllowed()) return false;
+        }
+        return true;
+    }
+}
+\`\`\`
+
+### AccountingApiCaller (API Proxy)
+\`\`\`php
+class AccountingApiCaller
+{
+    public function __call($name, $arguments)
+    {
+        if (!$this->limit->apiCallAllowed()) {
+            throw new ApiCallLimitException($this->limit->getErrorMessage());
+        }
+        sleep(1); // Rate limit delay
+        try {
+            $result = call_user_func_array([$this->apiService, $name], $arguments);
+            $this->limit->addApiCall(ApiLimitInterface::CALL_STATUS_SUCCESS);
+            return $result;
+        } catch (ServiceException $e) {
+            if ($e->getCode() === 429) throw new ApiCallLimitException($e->getMessage());
+            if ($e->getCode() === 401) throw new ApiAuthException($e->getMessage());
+            throw new ApiCallException($e->getMessage());
+        }
+    }
+}
+\`\`\`
+
+## 5. PID Restriction (Process Locking)
+
+\`\`\`php
+class PidRestriction extends ActiveRecord
+{
+    public function isRunning(): bool
+    {
+        exec('ps -p ' . $this->pid, $output);
+        return count($output) > 1;
+    }
+
+    public function updatePid(): bool
+    {
+        $oldPid = $this->getOldPid();
+        if ($oldPid && $oldPid->isRunning()) return false;
+        if ($oldPid) $oldPid->delete();
+        $this->pid = getmypid();
+        $this->key = 'sync';
+        return $this->save();
+    }
+}
+\`\`\`
+
+## 6. Bootstrap DI Container Wiring
+
+\`\`\`php
+class Bootstrap implements BootstrapInterface
+{
+    public function bootstrap($app)
+    {
+        $container = Yii::$container;
+
+        // Rate limiting
+        $container->setSingleton(ApiLimitService::class, function() {
+            $service = new ApiLimitService();
+            $service->attach(ApiLimit::getInstance());
+            $service->attach(ApiLimitCounter::getInstance());
+            return $service;
+        });
+
+        // Auth service, External API SDK (with auto-refresh), API caller
+        $container->setSingleton(AccountingApiCaller::class, function() use ($container) {
+            return new AccountingApiCaller(
+                $container->get(DataService::class),
+                $container->get(ApiLimitService::class)
+            );
+        });
+    }
+}
+\`\`\`
+
+Registered in config/common.php: \`'bootstrap' => ['app\\\\base\\\\Bootstrap']\`
+
+## 7. License Checking
+
+\`\`\`php
+class LicenseChecker
+{
+    const AVAILABLE_MODULE = 'available_accounting_integration';
+    const PERMITTED_VALUES = ['all', 'splynx-quickbooks'];
+
+    public static function check(): bool
+    {
+        if (!function_exists('ioncube_license_properties')) return true; // Dev
+        $properties = ioncube_license_properties();
+        return in_array($properties[self::AVAILABLE_MODULE]['value'] ?? null, self::PERMITTED_VALUES);
+    }
+}
+\`\`\`
+
+## 8. Cron-Based Synchronization
+
+Cron job: \`* 0-10 * * * splynx /var/www/splynx/addons/<addon>/yii sync/cron\`
+- Multiple comma-separated launch times
+- On install, randomized to spread API load
+- Per-entity boolean toggles
+- Custom PHP validator for HH:MM format
+
+## 9. Config Structure (config.json)
+
+Four blocks: **api** (Splynx connection), **accounting_api** (provider OAuth + settings),
+**synchronization** (payment methods, direction, patterns), **cron** (toggles + launch time).
+
+Key features:
+- Conditional fields: \`"conditions": [{"field": "country_code", "value": "US"}]\`
+- Encrypted hidden fields for tokens
+- Relations: PaymentsMethodsSelect, Partner
+- Custom validators: \`"validator": "config/validator_launch_time.php"\`
+
+## 10. Entry Points for Finance Config Tabs
+
+Type "code" entry points inject JS into Splynx core admin pages:
+\`\`\`php
+['name' => 'categories_config', 'type' => 'code',
+ 'root' => 'controllers\\\\admin\\\\config\\\\finance\\\\AccountingCategoriesController',
+ 'url' => urlencode('/addon-url/sync-accounting-categories')]
+\`\`\`
+
+Dashboard notifications check for misconfiguration via AJAX on page load.
+
+## 11. Background Console Execution from Web
+
+\`\`\`php
+protected function runCommand($action, $params = '')
+{
+    $cmd = Yii::getAlias('@app') . "/yii sync/{$action} {$params} >> {$logFile} 2>&1 &";
+    exec($cmd);
+}
+// Frontend polls /addon-url/tail every 1000ms for real-time log output
+\`\`\`
+
+## 12. Multi-Organization Support (Xero)
+
+Some providers support multiple organizations per OAuth token:
+- XeroOrganization ActiveRecord: tenant_id, name, is_active
+- Organization selection UI after OAuth
+- Warns about data reset on organization change
+
+## 13. Build/Packaging
+
+\`\`\`php
+$ionCubeEncode = true;
+$webSymLink = 'quickbooks-accounting';
+$controlConfig['Conflicts'] = 'splynx-xero, splynx-sageone, splynx-holded';
+\`\`\`
+
+## 14. Financial Helpers
+
+\`\`\`php
+class CompareHelper
+{
+    public static function numbersEqual($a, $b, $epsilon = 0.0001): bool
+    {
+        return abs($a - $b) < $epsilon;
+    }
+    public static function truncateNumber($number, $decimals = 2): float
+    {
+        return floor($number * pow(10, $decimals)) / pow(10, $decimals);
+    }
+}
+\`\`\`
+
+## 15. Allocation System
+
+After creating invoices/credit notes/payments, a second pass allocates (links) them.
+The additional_2/additional_3 fields track "needToAllocate" and "allocated" flags.
+
+## 16. Rounding Fix Pattern
+
+External systems may calculate totals differently:
+\`\`\`php
+if (!CompareHelper::numbersEqual($this->total, $this->accounting_total)) {
+    // Add "Rounding" line item with difference amount
+}
+\`\`\`
+
+## 17. Manual Customer Pairing
+
+Full GridView UI with Select2 AJAX search for manually linking Splynx customers
+to external system contacts. Stores external contacts in local CustomersManualPairing table.
+
+## 18. Validation System
+
+\`\`\`php
+class ValidateConfig extends BaseValidateConfig
+{
+    public static function checkAccountingApi()              { /* OAuth token exists */ }
+    public static function checkAccountingCategoriesConfig() { /* All categories mapped */ }
+    public static function checkAccountingBankAccountsConfig() { /* Default bank account */ }
+    public static function checkAccountingTaxRatesConfig()   { /* All taxes mapped */ }
+    public static function checkInvoicesSyncConfig()         { /* Combined check */ }
+}
+\`\`\`
+
+## 19. InstallController Specifics
+
+\`\`\`php
+public function actionIndex()
+{
+    touch(Yii::getAlias('@addons') . '/splynx-accounting'); // Marker file
+    AccountingCustomers::initFromBeginning();
+    AccountingInvoices::initFromDate(date('Y-m-d'));
+    AccountingCreditNotes::initFromDate(date('Y-m-d'));
+    AccountingPayments::initFromDate(date('Y-m-d'));
+    $this->createPaymentMethod('QuickBooks');
+    $this->addRandomCronLaunchTime();
+    $this->runMigrations();
+}
+
+// API permissions needed for accounting addons:
+// customers: Customer, CustomerInfo, CustomerBilling
+// finance: Invoices, Payments, Transactions, BankStatements, BankStatementsProcess, CreditNotes
+// Also: CustomerPaymentAccounts, PaymentsMethods, etc.
+\`\`\`
+
+## 20. Multi-Log Targets
+
+\`\`\`php
+// config/common.php - 6-7 dedicated log files per aspect
+'log' => ['targets' => [
+    ['logFile' => '@runtime/logs/output.log', 'categories' => ['output']],
+    ['logFile' => '@runtime/logs/api_error.log', 'categories' => ['api_error']],
+    ['logFile' => '@runtime/logs/sync_error.log', 'levels' => ['error']],
+    ['logFile' => '@runtime/logs/bidirectional.log', 'categories' => ['bidirectional_sync']],
+    // ...
+]],
+\`\`\`
+`;
+
+export const E_INVOICING_ADDON_GUIDE = `# E-Invoicing Addon Guide
+
+E-invoicing addons submit financial documents (invoices, credit notes) directly to a government tax authority.
+Unlike accounting addons (QuickBooks/Xero), these are **one-directional** (Splynx → government), do **not sync customers**, and use **tracker pattern** instead of pair pattern.
+
+Reference implementations: AADE myDATA (Greece), Verifactu (Spain).
+
+## Key Differences from Accounting Addons
+
+| Aspect | Accounting | E-Invoicing |
+|---|---|---|
+| Direction | Bidirectional sync | One-way (Splynx → government) |
+| Customer sync | Yes | No |
+| Authentication | OAuth2 flow | API keys (AADE) or digital certificates (Verifactu) |
+| Data format | JSON REST | XML (Sabre XML or DOMDocument) |
+| Change detection | Pair pattern (ID mapping) | Tracker pattern (hash comparison) |
+| Document types | Generic invoices/payments | Government-coded types (e.g., "1.1" Sales Invoice, "F1" Standard) |
+| Tax handling | Simple rate sync | Complex: composite taxes, exemption causes, income classifications |
+| Unique output | — | QR code URLs, government marks/UIDs |
+
+## Architecture Overview
+
+\\\`\\\`\\\`
+addon/
+├── base/
+│   ├── Bootstrap.php              # DI container wiring (BootstrapInterface)
+│   └── BaseWebController.php      # Base controller with auth
+├── commands/
+│   ├── InstallController.php      # Addon installation
+│   ├── ServiceController.php      # Sync start/stop/cron
+│   ├── ConfigController.php       # Setup/reset einvoicing tables
+│   ├── ProcessController.php      # Background task processing
+│   ├── HookController.php         # Real-time hook handlers (optional)
+│   └── BaseCommandController.php  # Timestamped output base
+├── components/
+│   ├── <provider>/                # Government API integration
+│   │   ├── api/                   # API client, service, models (AADE)
+│   │   ├── services/              # Service classes (Verifactu)
+│   │   ├── models/                # XML data models
+│   │   ├── enums/                 # Government-mandated code enums
+│   │   ├── schemes/               # XSD/WSDL schema files
+│   │   └── ErrorRegistry.php      # Government error codes
+│   ├── ValidateConfig.php         # Pre-sync config validation
+│   └── Mappings.php               # Tax/type code mappings
+├── config/
+│   ├── config.json                # 3 blocks: api, service, synchronization
+│   ├── web.php / console.php
+│   ├── common.php                 # Multi-target logging
+│   ├── url_rules.php
+│   └── InvoiceTypeMap.php         # Billing category → government type mapping
+├── controllers/
+│   ├── SiteController.php         # Dashboard: manual sync, log tailing
+│   ├── ConfigController.php       # Invoice type mapping UI
+│   ├── TransmittedDocsController  # View submitted documents (AADE)
+│   └── CertificateController.php  # Certificate management (Verifactu)
+├── models/
+│   ├── SyncService.php            # Central sync orchestrator
+│   ├── einvoicing/                # DB records: BaseEInvoicing, mappings
+│   ├── managers/                  # Document lifecycle managers
+│   ├── trackers/                  # Hash-based change detection
+│   ├── tasks/                     # Background task models
+│   ├── api/                       # Splynx API wrappers (read-only)
+│   ├── splynx/                    # Splynx DB models (read-only)
+│   ├── sync/                      # Sync operation classes (Verifactu)
+│   └── config/                    # Config form models
+├── views/
+│   ├── site/                      # Manual sync dashboard
+│   ├── config/                    # Invoice type mapping
+│   ├── transmitted-docs/          # Submitted documents viewer
+│   ├── common/menu.twig           # Addon navigation menu
+│   └── certificate/               # Certificate upload (Verifactu)
+├── helpers/
+│   ├── ConfigHelper.php           # Config value access
+│   ├── CompanyInfo.php            # Partner company data
+│   └── XmlServiceHelper.php       # XML namespace/deserializer config
+├── actions/
+│   └── HandleNotificationsAction  # Dashboard error notifications
+├── data/
+│   └── certificates/<partnerId>/  # Digital certificate storage (Verifactu)
+├── migrations/                    # SQLite migrations
+└── build/
+    ├── config.php                 # ionCube, Region flag, dependencies
+    └── package-files/etc/cron.d/  # Cron job definition
+\\\`\\\`\\\`
+
+## Government API Authentication
+
+### API Key Authentication (AADE Greece)
+\\\`\\\`\\\`php
+// Client sends headers with every request
+'aade-user-id' => $username,
+'Ocp-Apim-Subscription-Key' => $apiKey
+\\\`\\\`\\\`
+Config stores service_login and service_auth_key (encrypted type).
+
+### Certificate-Based Authentication (Verifactu Spain)
+\\\`\\\`\\\`php
+// SOAP client uses mutual TLS
+$soapOptions = [
+    'local_cert' => $pemFilePath,  // Combined cert + key PEM
+    'passphrase' => $certPassword,
+];
+\\\`\\\`\\\`
+- CertificateManagerService reads PFX/P12/PEM files
+- Extracts X.509 certificate and private key
+- Supports OpenSSL 3.x legacy fallback (-legacy flag for RC2-40 ciphers)
+- Per-partner certificate storage in data/certificates/<partnerId>/
+- Config uses addon_button type to redirect to certificate upload page
+
+## Tracker Pattern (Change Detection)
+
+Unlike accounting's pair pattern (which maps Splynx ID <-> external ID), e-invoicing uses trackers that store a **snapshot** of document state and detect changes via hash comparison.
+
+\\\`\\\`\\\`php
+interface Trackable {
+    public function getTracker(): BaseTracker;
+}
+
+class BaseTracker extends ActiveRecord {
+    // Fields: id, einvoicing_id, created_at, updated_at
+    abstract public function loadForSave($model, string $eInvoicingId, array $data);
+}
+
+class InvoiceTracker extends BaseTracker {
+    // Additional: customer_id, number, date_created, items (SHA-256 hash)
+    // Verifactu adds: huella_hash, submit_timestamp, status
+
+    public function isUpdateRequired(Invoice $model): bool {
+        // Compare current state against stored snapshot
+        return $this->number !== $model->number
+            || $this->date_created !== $model->date_created
+            || $this->items !== self::hashItems($model->items);
+    }
+}
+\\\`\\\`\\\`
+
+The items field stores a SHA-256 hash of JSON-serialized invoice line items (description, price, tax, quantity). This enables detecting content changes without storing full item data.
+
+## EInvoicing Database Records
+
+The addon uses Splynx's built-in einvoicing_invoices and einvoicing_credit_notes tables (created via ConfigController setup commands).
+
+\\\`\\\`\\\`php
+class BaseEInvoicing extends ActiveRecord {
+    const STATUS_NEW = 'new';
+    const STATUS_PENDING = 'pending';
+    const STATUS_OK = 'ok';
+    const STATUS_ERROR = 'error';
+
+    // Virtual properties via field_* columns:
+    // field_1 = error message, field_2 = uid, field_3 = cancellationMark, field_4 = previousMark
+
+    public function getNewRecords(int $limit = 25);      // Batch size 25
+    public function getModifiedRecords(int $limit = 25);
+    public function findRecordsForDelete();
+
+    // Records are NEVER deleted, only soft-deleted
+    public function delete() { throw new NotSupportedException(); }
+}
+\\\`\\\`\\\`
+
+## Manager Pattern (Document Lifecycle)
+
+Managers orchestrate the complete document lifecycle (create -> update -> cancel):
+
+\\\`\\\`\\\`php
+class BaseManager {
+    protected $_apiInstance;    // Government API service (lazy from DI)
+    protected $_splynxModel;   // Splynx invoice/credit note
+    protected $_apiModel;      // XML document model
+    protected $_eInvoicingModel; // EInvoicing DB record
+
+    abstract public function populateApiModel();  // Build XML document
+    public function add();     // Submit new document
+    public function update();  // Re-submit if tracker detects changes
+    public function cancel();  // Cancel submitted document
+}
+\\\`\\\`\\\`
+
+**Add flow:**
+1. populateApiModel() builds XML document with issuer, counterpart, header, items, tax details
+2. Submit to government API
+3. On success: update tracker, save QR URL to Splynx invoice, store government mark/uid
+4. On failure: mark einvoicing record as failed
+
+**Update flow:**
+- AADE: Submit as new document, store previousInvoiceMark
+- Verifactu: If only items changed -> send with Subsanacion='S'; if number/date changed -> cancel old + submit new
+
+**Cancel flow:**
+- AADE: Call CancelInvoice endpoint with stored mark
+- Verifactu: Submit RegistroAnulacion XML with chaining to previous document
+
+## Invoice Type Mapping
+
+E-invoicing requires mapping Splynx billing categories to government-specific document types. The mapping is often **dual**: different types for companies vs. private persons.
+
+\\\`\\\`\\\`php
+// AADE: invoice_type_map table
+class InvoiceTypeMap extends ActiveRecord {
+    // billing_transaction_category_id -> einvoicing_id (company) + einvoicing_private_person_id (person)
+}
+
+// Example AADE types:
+// 1.1 = Sales Invoice, 1.2 = Intra-community Sales, 2.1 = Service Rendered
+// 5.2 = Credit Invoice, 11.1 = Retail Sales Receipt, 11.3 = Simplified Invoice
+
+// Verifactu types (PHP 8.1 enums):
+enum InvoiceType: string {
+    case F1 = 'F1';  // Standard
+    case F2 = 'F2';  // Simplified
+    case R1 = 'R1';  // Rectification (credit note for companies)
+    // ...
+}
+\\\`\\\`\\\`
+
+## Tax & Classification Mapping
+
+### Tax Rate Mapping
+Each Splynx tax rate maps to a government VAT category:
+- AADE: 8 categories (24%, 13%, 6%, 17%, 9%, 4%, Without VAT, Records without VAT) + composite taxes
+- Verifactu: uses standard Spanish tax rates with regime types
+
+### Composite Taxes (Telecom-specific)
+AADE supports composite taxes where VAT and telecom fees are combined:
+\\\`\\\`\\\`php
+// Example: 30.2% = 24% VAT + 5% landline subscriber fee
+$compositeTaxes = [
+    1001 => ['vat' => 24, 'fee' => 5, 'vatCategory' => 1, 'feeCategory' => 7],
+];
+\\\`\\\`\\\`
+
+### Income Classification (AADE)
+Required per line item with government E3 category + type codes:
+\\\`\\\`\\\`php
+$incomeClassificationCategory = [
+    'category1_1' => 'Commodity Sales Income',
+    'category1_2' => 'Product Sales Income',
+    'category1_3' => 'Service Provision Income',
+    // 11 categories total
+];
+$incomeClassificationType = [
+    'E3_561_001' => 'Sales of goods & commodities',
+    'E3_561_002' => 'Product sales at third parties',
+    // 32 types total
+];
+\\\`\\\`\\\`
+
+## XML Document Generation
+
+### REST + Sabre XML (AADE)
+\\\`\\\`\\\`php
+// Bootstrap wires XmlService via DI
+$xmlService = new Sabre\\Xml\\Service();
+XmlServiceHelper::configureService($xmlService);
+// Registers namespace mappings and element->model deserializers
+
+// InvoicesCollection implements XmlSerializable
+class InvoicesCollection implements XmlSerializable {
+    public array $invoice = [];
+    public function xmlSerialize(Writer $writer): void {
+        foreach ($this->invoice as $inv) {
+            $writer->write(['{namespace}invoice' => $inv]);
+        }
+    }
+}
+
+// MyDataService serializes and sends
+$xml = $xmlService->write('{namespace}InvoicesDoc', $collection);
+$response = $client->call('POST', 'SendInvoices', ['body' => $xml]);
+\\\`\\\`\\\`
+
+### SOAP + DOMDocument + xmlseclibs (Verifactu)
+\\\`\\\`\\\`php
+// InvoiceSerializer builds XML using DOMDocument
+$doc = new DOMDocument('1.0', 'UTF-8');
+$registroAlta = $doc->createElementNS(SF_NAMESPACE, 'sf:RegistroAlta');
+// ... build full XML structure
+
+// XmlSignerService signs each document
+$objDSig = new XMLSecurityDSig();
+$objDSig->setCanonicalMethod(XMLSecurityDSig::EXC_C14N);
+$objKey = new XMLSecurityKey(XMLSecurityKey::RSA_SHA256, ['type' => 'private']);
+$objKey->loadKey($privateKey);
+$objDSig->sign($objKey, $doc->documentElement);
+
+// SoapClientFactoryService creates SOAP client with certificate
+$client = new SoapClient($wsdlPath, [
+    'local_cert' => $combinedPemPath,
+    'passphrase' => $password,
+]);
+
+// VerifactuService sends via SOAP
+$response = $client->RegFactuSistemaFacturacion(new SoapVar($xml, XSD_ANYXML));
+\\\`\\\`\\\`
+
+## Hash Chaining (Verifactu)
+
+Verifactu requires SHA-256 hash chain integrity. Each document references the previous document's hash:
+
+\\\`\\\`\\\`php
+class HashGeneratorService {
+    // Submission hash: IDEmisorFactura=NIF&NumSerieFactura=num&FechaExpedicion=date&
+    //                  TipoFactura=type&CuotaTotal=tax&ImporteTotal=total&
+    //                  Huella=previousHash&FechaHoraHusoGenRegistro=timestamp
+    public function generateSubmissionHash(InvoiceSubmission $invoice): string {
+        return strtoupper(hash('sha256', $dataString));
+    }
+}
+
+class Chaining {
+    // Mutually exclusive: first record OR reference to previous
+    public ?string $primerRegistro = null;  // 'S' if first in chain
+    public ?PreviousInvoiceChaining $registroAnterior = null;
+}
+\\\`\\\`\\\`
+
+Before first sync, the addon queries the government API to find the last document in the chain.
+
+## QR Code Generation
+
+Both addons generate government verification QR codes saved as additional fields on invoices:
+
+\\\`\\\`\\\`php
+// AADE: QR URL returned by API in response
+$invoice->additional_attributes['aade_qr_code_url'] = $response->qrUrl;
+
+// Verifactu: QR URL computed locally
+$qrUrl = "https://www2.agenciatributaria.gob.es/wlpl/TIKE-CONT/ValidarQR" .
+    "?nif={nif}&numserie={number}&fecha={date}&importe={total}";
+$invoice->additional_attributes['verifactu_qr_code_url'] = $qrUrl;
+\\\`\\\`\\\`
+
+Verifactu uses HookController to generate QR codes in real-time on invoice create/edit events.
+
+## Sync Architecture
+
+### Entry Points
+- **Cron**: service/cron (every 4 hours AADE / every 2 hours Verifactu)
+- **Manual**: SiteController -> Background task -> SyncWorker
+- **CLI**: service/start-sync command
+
+### Sync Flow (SyncService)
+\\\`\\\`\\\`
+addNewInvoices()       -> Submit new invoices in batches
+updateInvoices()       -> Re-submit modified invoices
+cancelInvoices()       -> Cancel deleted invoices
+addNewCreditNotes()    -> Submit new credit notes
+updateCreditNotes()    -> Re-submit modified credit notes
+cancelCreditNotes()    -> Cancel deleted credit notes
+\\\`\\\`\\\`
+
+Documents are grouped by partner_id. Each partner initializes its own API config.
+
+### Batch Processing
+- AADE: Batch size 25 (per API recommendation)
+- Verifactu: Batch up to 1000 documents, or when submission_time expires
+
+### Response Processing
+Government returns per-document status:
+- Success (store mark/uid, update tracker, save QR)
+- Accepted with errors (needs correction)
+- Rejected (mark as failed with error code)
+- Duplicate (already submitted)
+
+## Config Validation
+
+\\\`\\\`\\\`php
+class ValidateConfig {
+    public function validate(): array {
+        return array_merge(
+            $this->checkServiceApi(),              // API credentials set
+            $this->checkEinvoicingTaxRatesConfig(), // All taxes mapped
+            $this->checkEinvoicingPaymentTypesConfig(), // All payment methods mapped
+            $this->checkEinvoicingInvoiceTypeConfig(),  // All billing categories mapped
+            $this->checkEinvoicingCategoriesConfig(),   // Income classifications mapped
+        );
+    }
+}
+\\\`\\\`\\\`
+
+All mappings must be complete before sync runs. Incomplete config shows as dashboard notification.
+
+## InstallController Specifics
+
+\\\`\\\`\\\`php
+class InstallController extends BaseInstallController {
+    public function getModuleName(): string { return 'splynx_addon_<name>'; }
+    public function getMinVersion(): string { return '4.0'; }
+
+    // API permissions for invoice/credit note operations
+    public function getApiPermissions(): array {
+        return [
+            ['controller' => 'admin\\\\customers\\\\Customer', 'actions' => ['index', 'view']],
+            ['controller' => 'admin\\\\finance\\\\Invoices', 'actions' => ['index', 'view', 'update']],
+            ['controller' => 'admin\\\\finance\\\\CreditNotes', 'actions' => ['index', 'view', 'update']],
+            // update needed for saving QR code URL back to Splynx
+        ];
+    }
+
+    // Additional fields on Splynx entities
+    public function getAdditionalFields(): array {
+        return [
+            ['module' => 'customers', 'name' => '<prefix>_country', 'title' => 'Country Code'],
+            ['module' => 'invoices', 'name' => '<prefix>_qr_code_url', 'title' => 'QR Code URL', 'readonly' => true],
+            ['module' => 'credit_notes', 'name' => '<prefix>_qr_code_url', 'title' => 'QR Code URL', 'readonly' => true],
+        ];
+    }
+
+    // Entry points: menu link + dashboard notification
+    public function getEntryPoints(): array {
+        return [
+            ['name' => 'menu', 'root' => 'admin/finance/...', 'type' => 'menu_link'],
+            ['name' => 'notification', 'root' => 'admin/dashboard/...', 'type' => 'code'],
+        ];
+    }
+
+    // afterAction triggers einvoicing module initialization:
+    // - Setup einvoicing tables (from install date)
+    // - Enable einvoicing flag file: /var/www/splynx/addons/splynx-eInvoicing
+    // - Setup tax rates, payment methods, categories mappings
+}
+\\\`\\\`\\\`
+
+The flag file /var/www/splynx/addons/splynx-eInvoicing enables einvoicing UI elements in Splynx core.
+
+## Per-Partner Support
+
+Both addons support multi-partner Splynx installations:
+- Partner ignore list in config
+- Documents grouped by customer's partner_id
+- Per-partner API credentials or certificates
+- Per-partner company info (NIF/VAT, name, branch)
+- Config supports per_partner_options block for partner-specific settings
+
+## Credit Note Handling
+
+Credit notes require special treatment:
+- **AADE**: Mapped to credit invoice types (5.2, 11.4)
+- **Verifactu**: Sent as rectification invoices (R1-R5) with negated totals, linked to original invoice via FacturasRectificadas
+- Both track credit notes in separate tracker tables
+- Credit note items may be validated against original invoice items
+
+## Error Handling
+
+### Government Error Codes
+Each authority has its own error code registry:
+- Verifactu: ~200 categorized error codes (4xxx shipment errors, 1xxx validation, 3xxx duplication, 2xxx accepted-with-errors)
+- AADE: Error responses parsed from XML with status codes per document
+
+### Dashboard Notifications
+HandleNotificationsAction checks for:
+- Documents with errors in last 30 days
+- Incomplete configuration mappings
+- Displays notifications on Splynx admin dashboard via code entry point
+
+## Logging
+
+Multi-target logging via Yii2 log component:
+\\\`\\\`\\\`php
+// config/common.php
+'targets' => [
+    ['logFile' => 'output.log', 'categories' => ['output']],
+    ['logFile' => 'http_client_log.log', 'categories' => ['einvoicing_api_*']],
+    ['logFile' => 'api_error_responses.log', 'categories' => ['api_error']],
+    ['logFile' => 'sync_error.log', 'categories' => ['sync_error']],
+    ['logFile' => 'sync_info.log', 'categories' => ['sync_info']],
+]
+\\\`\\\`\\\`
+
+## Build Configuration
+
+\\\`\\\`\\\`php
+// build/config.php
+$ionCubeEncode = true;
+$webSymLink = '<addon-url>';
+$controlConfig = [
+    'Depends' => '{{addonBasePackage}} (>= {{addonBaseVersion}}), php8.3-xml, ...',
+    'Region' => 'gr',  // Country-specific region flag
+];
+\\\`\\\`\\\`
+
+Dependencies typically include: php-xml, php-soap (Verifactu), php-openssl (Verifactu).
+`;
+
+// ---------------------------------------------------------------------------
+// ADVANCED PATTERNS (cross-cutting patterns from real production addons)
+// ---------------------------------------------------------------------------
+export const ADVANCED_PATTERNS_GUIDE = `# Advanced Splynx Addon Patterns
+
+Real-world Splynx addons use patterns beyond the basics. This guide covers cross-cutting patterns observed across production addons (hotspot provisioning, banking integrations, fee engines, reseller management, mail processing).
+
+## Console-Only (Headless) Addons
+
+Some addons have NO web interface at all — no web.php, no controllers, no views. They operate entirely through hooks and console commands.
+
+### When to Use
+- Email/notification processing
+- Background data synchronization
+- Bulk operations triggered by Splynx events
+
+### Structure
+\\\`\\\`\\\`
+my-headless-addon/
+├── commands/
+│   ├── InstallController.php
+│   ├── HookController.php
+│   └── ToolsController.php    # Manual CLI operations
+├── components/
+│   └── ActionInterface.php
+├── config/
+│   ├── config.json
+│   ├── console.php            # Only console config, NO web.php
+│   └── params.example.php
+├── data/
+├── migrations/
+├── models/
+└── build/
+\\\`\\\`\\\`
+
+Key differences:
+- No \\\`config/web.php\\\` — addon cannot serve HTTP requests
+- Entry points use \\\`type: "code"\\\` to inject JS snippets into Splynx pages (e.g., opt-in toggles on customer pages)
+- All logic runs via hooks (STDIN JSON) and cron console commands
+- ToolsController provides manual CLI for re-running operations
+
+## ActionInterface Pattern
+
+Decouple business logic from controllers into standalone Action classes. Each action is a single-responsibility unit.
+
+\\\`\\\`\\\`php
+interface ActionInterface
+{
+    public function run(): void;
+}
+
+// Each action is self-contained
+class ProcessInvoicesAction implements ActionInterface
+{
+    private SplynxApi $api;
+    private SqliteDb $db;
+
+    public function __construct(SplynxApi $api, SqliteDb $db)
+    {
+        $this->api = $api;
+        $this->db = $db;
+    }
+
+    public function run(): void
+    {
+        $invoices = $this->api->getInvoices();
+        foreach ($invoices as $invoice) {
+            $this->processOne($invoice);
+        }
+    }
+}
+
+// HookController dispatches to actions
+class HookController extends Controller
+{
+    public function actionProcess(): void
+    {
+        $data = json_decode(file_get_contents('php://stdin'), true);
+        $action = $this->resolveAction($data['model'], $data['action']);
+        $action->run();
+    }
+}
+\\\`\\\`\\\`
+
+Benefits: testable, composable (cron can also call actions), single-responsibility.
+
+## Dual Database Pattern (SQLite + MySQL)
+
+Some addons need BOTH databases simultaneously:
+- **SQLite**: Addon-owned data (rules, settings, logs, tracking records)
+- **MySQL (Splynx)**: Read-only access to Splynx entities (customers, invoices, services)
+
+\\\`\\\`\\\`php
+// config/console.php (or web.php)
+'components' => [
+    // SQLite — addon's own database (read-write)
+    'sqliteDb' => require __DIR__ . '/db_sqlite.php',
+    // MySQL — Splynx main database (typically read-only)
+    'db' => require __DIR__ . '/db.php',
+],
+
+// Model using SQLite
+class FeeRule extends ActiveRecord {
+    public static function getDb() { return \\Yii::\\$app->sqliteDb; }
+    public static function tableName() { return 'fee_rules'; }
+}
+
+// Model reading from Splynx MySQL (read-only, no writes!)
+class SplynxCustomer extends ActiveRecord {
+    // Uses default 'db' component = MySQL
+    public static function tableName() { return '{{%customers}}'; }
+}
+\\\`\\\`\\\`
+
+**Critical rule**: Never write to Splynx MySQL tables directly. Use the Splynx API for writes. MySQL is read-only for performance (batch reads, joins, aggregations that API can't do efficiently).
+
+## Repository Pattern with Static Caching
+
+For addons processing many records in batch (cron jobs, bulk hooks), cache API/DB results in memory to avoid repeated queries:
+
+\\\`\\\`\\\`php
+class CustomerRepository
+{
+    private static ?array $cache = null;
+
+    public static function getAll(): array
+    {
+        if (self::$cache === null) {
+            self::$cache = SplynxApi::getCustomers();
+        }
+        return self::$cache;
+    }
+
+    public static function findById(int $id): ?array
+    {
+        $all = self::getAll();
+        return $all[$id] ?? null;
+    }
+
+    public static function clearCache(): void
+    {
+        self::$cache = null;
+    }
+}
+\\\`\\\`\\\`
+
+Use at the start of a batch operation, clear at the end. Avoids N+1 API calls when processing hundreds of entities in a cron run.
+
+## ChunkApiLoadTrait — Batched API Queries
+
+The Splynx API has URL length limits. When loading many entities by IDs, chunk the requests:
+
+\\\`\\\`\\\`php
+trait ChunkApiLoadTrait
+{
+    protected function loadByIds(array $ids, string $endpoint): array
+    {
+        $chunkSize = 80; // Safe chunk size to avoid URL length limits
+        $results = [];
+
+        foreach (array_chunk($ids, $chunkSize) as $chunk) {
+            $filter = implode(',', $chunk);
+            $response = $this->api->get($endpoint, ['id__in' => $filter]);
+            $results = array_merge($results, $response);
+        }
+
+        return $results;
+    }
+}
+\\\`\\\`\\\`
+
+## Fee Type Registry / Rule Engine Pattern
+
+When an addon applies different logic based on entity types, use a registry pattern:
+
+\\\`\\\`\\\`php
+// Base class defines the template
+abstract class AbstractFeeType
+{
+    abstract public function getHookEvents(): array;
+    abstract public function applies(array $entity, FeeRule $rule): bool;
+    abstract public function calculate(array $entity, FeeRule $rule): float;
+
+    // Template method — subclasses only override what varies
+    public function process(array $entity, FeeRule $rule): void
+    {
+        if (!$this->applies($entity, $rule)) return;
+        $amount = $this->calculate($entity, $rule);
+        $this->applyFee($entity, $amount);
+    }
+}
+
+class ServiceActivationFee extends AbstractFeeType
+{
+    public function getHookEvents(): array {
+        return ['internet_service/create', 'voice_service/create'];
+    }
+
+    public function applies(array $entity, FeeRule $rule): bool {
+        return $entity['status'] === 'active';
+    }
+
+    public function calculate(array $entity, FeeRule $rule): float {
+        return $rule->amount; // Fixed fee
+    }
+}
+
+// Registry drives hook registration
+class FeeTypeRegistry
+{
+    private array $types = [];
+
+    public function register(AbstractFeeType $type): void {
+        foreach ($type->getHookEvents() as $event) {
+            $this->types[$event][] = $type;
+        }
+    }
+
+    public function getTypesForEvent(string $event): array {
+        return $this->types[$event] ?? [];
+    }
+}
+\\\`\\\`\\\`
+
+InstallController registers hooks dynamically based on which fee types are active. New fee types = new hook events, no controller changes.
+
+## Bank Statement Import (PULL Pattern)
+
+Unlike payment gateways (PUSH — customers trigger payments), bank integrations PULL transaction data from external sources and match to customers.
+
+### Architecture
+1. **Cron job** fetches new bank statements periodically
+2. **Staging table** stores raw transactions (SQLite)
+3. **Pairing engine** matches transactions to Splynx customers
+4. **Import phase** creates Splynx payments via API
+
+\\\`\\\`\\\`php
+// Phase 1: Search — fetch from bank API
+class SearchAction implements ActionInterface {
+    public function run(): void {
+        $statements = $this->bankApi->getStatements($this->getDateRange());
+        foreach ($statements as $stmt) {
+            StagingRecord::createFromBankData($stmt);
+        }
+    }
+}
+
+// Phase 2: Preview — match to customers
+class PreviewAction implements ActionInterface {
+    public function run(): void {
+        $unmatched = StagingRecord::findUnmatched();
+        foreach ($unmatched as $record) {
+            $customer = $this->pairingEngine->findMatch($record);
+            if ($customer) {
+                $record->customer_id = $customer['id'];
+                $record->status = 'matched';
+                $record->save();
+            }
+        }
+    }
+}
+
+// Phase 3: Import — create payments in Splynx
+class ImportAction implements ActionInterface {
+    public function run(): void {
+        $matched = StagingRecord::findMatched();
+        foreach ($matched as $record) {
+            $this->splynxApi->createPayment($record->customer_id, [
+                'amount' => $record->amount,
+                'date' => $record->date,
+                'note' => $record->reference,
+            ]);
+            $record->status = 'imported';
+            $record->save();
+        }
+    }
+}
+\\\`\\\`\\\`
+
+### Customer Pairing Strategies
+- Match by reference number / customer ID in transaction text
+- Match by customer name
+- Match by exact amount + date range
+- Manual pairing UI for unmatched transactions
+
+## Cron-Driven Background Pipelines
+
+For long-running operations, use Splynx's cron system with multi-phase processing:
+
+\\\`\\\`\\\`php
+// InstallController
+public function getCrons(): array
+{
+    return [
+        [
+            'type' => 'console_command',
+            'path' => '/var/www/splynx/addons/my-addon/yii cron/run',
+            'description' => 'Main processing pipeline',
+            'frequency' => '*/15 * * * *', // Every 15 minutes
+            'enabled' => true,
+        ],
+    ];
+}
+
+// CronController
+class CronController extends Controller
+{
+    public function actionRun(): void
+    {
+        // Phase-based execution
+        (new SearchAction($this->api, $this->db))->run();
+        (new PreviewAction($this->api, $this->db))->run();
+        (new ImportAction($this->api, $this->db))->run();
+    }
+}
+\\\`\\\`\\\`
+
+Configurable scheduling: some addons let admins set cron frequency via config.json, or choose between "auto" (cron only) and "hybrid" (cron + hooks) modes.
+
+## Cross-Module Additional Fields
+
+Addons can register additional fields on Splynx entities from OTHER modules — not just their own domain:
+
+\\\`\\\`\\\`php
+// InstallController
+public function getAdditionalFields(): array
+{
+    return [
+        // Field on customer entity
+        ['module' => 'customers', 'name' => 'my_addon_tier', 'title' => 'Addon Tier'],
+        // Field on internet service entity (cross-module!)
+        ['module' => 'internet_services', 'name' => 'my_addon_profile', 'title' => 'Profile Override'],
+        // Field on invoice entity
+        ['module' => 'invoices', 'name' => 'my_addon_ref', 'title' => 'External Reference', 'readonly' => true],
+    ];
+}
+\\\`\\\`\\\`
+
+These fields appear in Splynx forms and are accessible via API. Useful for storing addon-specific metadata on standard Splynx entities without modifying the main database schema.
+
+### Per-Partner Conditional Fields
+Some addons show different additional fields based on the customer's partner:
+
+\\\`\\\`\\\`php
+// Config-driven field visibility
+public function getAdditionalFields(): array
+{
+    $fields = [
+        ['module' => 'customers', 'name' => 'hotspot_enabled', 'title' => 'Hotspot Enabled'],
+    ];
+
+    // Additional fields only for partners that have the feature enabled
+    if ($this->config->get('per_partner_fields')) {
+        $fields[] = ['module' => 'internet_services', 'name' => 'bandwidth_profile', 'title' => 'Bandwidth Profile'];
+    }
+
+    return $fields;
+}
+\\\`\\\`\\\`
+
+## Custom Dataset via Splynx Module API
+
+For entities that should live in Splynx's own module system (not addon's SQLite), use the Module API to register custom datasets:
+
+\\\`\\\`\\\`php
+// InstallController
+public function getCustomDatasets(): array
+{
+    return [
+        [
+            'name' => 'reseller_commissions',
+            'title' => 'Reseller Commissions',
+            'fields' => [
+                ['name' => 'reseller_id', 'type' => 'integer', 'title' => 'Reseller'],
+                ['name' => 'type', 'type' => 'enum', 'title' => 'Type', 'values' => ['percentage', 'fixed', 'new_customer']],
+                ['name' => 'amount', 'type' => 'decimal', 'title' => 'Amount'],
+                ['name' => 'clawback_days', 'type' => 'integer', 'title' => 'Clawback Period (days)'],
+            ],
+        ],
+    ];
+}
+\\\`\\\`\\\`
+
+Data lives in Splynx's database, accessible via standard Splynx API CRUD endpoints. The addon queries it via API, not direct DB access. Use this when the data conceptually belongs to Splynx (visible in admin UI, subject to Splynx permissions).
+
+## Partner-Aware Configuration
+
+Multi-partner Splynx installations require partner-specific addon configuration:
+
+\\\`\\\`\\\`json
+// config.json — per-partner options block
+{
+    "settings": {
+        "api_key": {"type": "string", "title": "Default API Key"},
+        "per_partner_options": {
+            "type": "object",
+            "title": "Per-Partner Settings",
+            "properties": {
+                "api_key": {"type": "string", "title": "Partner API Key"},
+                "enabled": {"type": "boolean", "title": "Enabled for Partner"}
+            }
+        }
+    }
+}
+\\\`\\\`\\\`
+
+\\\`\\\`\\\`php
+// Resolving partner-specific config at runtime
+class ConfigResolver
+{
+    public function getApiKey(int $partnerId): string
+    {
+        $partnerConfig = $this->config->get("per_partner_options.$partnerId");
+        if ($partnerConfig && !empty($partnerConfig['api_key'])) {
+            return $partnerConfig['api_key'];
+        }
+        return $this->config->get('api_key'); // Fallback to default
+    }
+}
+\\\`\\\`\\\`
+
+## Commission Engine Pattern
+
+For addons that compute commissions or rewards:
+
+\\\`\\\`\\\`php
+abstract class AbstractCommissionType
+{
+    abstract public function calculate(array $context): float;
+    abstract public function supportsClawback(): bool;
+}
+
+class PercentageCommission extends AbstractCommissionType {
+    public function calculate(array $context): float {
+        return $context['invoice_total'] * ($context['rate'] / 100);
+    }
+    public function supportsClawback(): bool { return true; }
+}
+
+class FixedCommission extends AbstractCommissionType {
+    public function calculate(array $context): float {
+        return $context['fixed_amount'];
+    }
+    public function supportsClawback(): bool { return false; }
+}
+
+class NewCustomerCommission extends AbstractCommissionType {
+    public function calculate(array $context): float {
+        return $context['bonus_amount'];
+    }
+    public function supportsClawback(): bool { return true; }
+
+    // Clawback: if customer cancels within N days, reverse commission
+    public function shouldClawback(array $commission, int $daysSinceCreation): bool {
+        return $daysSinceCreation <= $commission['clawback_days'];
+    }
+}
+\\\`\\\`\\\`
+
+## DataTables AJAX Pattern
+
+For admin UI pages with server-side paginated tables:
+
+\\\`\\\`\\\`php
+class SiteController extends Controller
+{
+    // Serves both HTML page and AJAX data from same action
+    public function actionIndex(): mixed
+    {
+        if (\\Yii::\\$app->request->isAjax) {
+            return $this->asJson($this->getDataTablesResponse());
+        }
+        return $this->render('index');
+    }
+
+    private function getDataTablesResponse(): array
+    {
+        $query = MyModel::find();
+
+        // Apply DataTables search/sort/pagination
+        $search = \\Yii::\\$app->request->get('search')['value'] ?? '';
+        if ($search) {
+            $query->andFilterWhere(['like', 'name', $search]);
+        }
+
+        $total = $query->count();
+        $start = \\Yii::\\$app->request->get('start', 0);
+        $length = \\Yii::\\$app->request->get('length', 25);
+        $records = $query->offset($start)->limit($length)->all();
+
+        return [
+            'draw' => (int)\\Yii::\\$app->request->get('draw'),
+            'recordsTotal' => $total,
+            'recordsFiltered' => $total,
+            'data' => array_map(fn($r) => $r->toArray(), $records),
+        ];
+    }
+}
+\\\`\\\`\\\`
+
+## Console Output for Long-Running Commands
+
+For CLI commands that process large datasets, provide progress feedback:
+
+\\\`\\\`\\\`php
+interface ConsoleOutputInterface
+{
+    public function info(string $message): void;
+    public function error(string $message): void;
+    public function progress(int $current, int $total): void;
+}
+
+trait ConsoleOutputTrait
+{
+    public function info(string $message): void
+    {
+        $this->stdout("[INFO] $message\\n");
+    }
+
+    public function error(string $message): void
+    {
+        $this->stderr("[ERROR] $message\\n");
+    }
+
+    public function progress(int $current, int $total): void
+    {
+        $pct = $total > 0 ? round($current / $total * 100) : 0;
+        $this->stdout("\\r[$pct%] $current / $total");
+    }
+}
+\\\`\\\`\\\`
+
+## Sensitive Data Logging
+
+When logging API requests that may contain credentials:
+
+\\\`\\\`\\\`php
+class HidingFieldsForLogs
+{
+    private const SENSITIVE_FIELDS = ['password', 'api_key', 'token', 'secret', 'certificate'];
+
+    public static function mask(array $data): array
+    {
+        foreach ($data as $key => &$value) {
+            if (is_array($value)) {
+                $value = self::mask($value);
+            } elseif (self::isSensitive($key)) {
+                $value = '***HIDDEN***';
+            }
+        }
+        return $data;
+    }
+
+    private static function isSensitive(string $key): bool
+    {
+        foreach (self::SENSITIVE_FIELDS as $field) {
+            if (stripos($key, $field) !== false) return true;
+        }
+        return false;
+    }
+}
+
+// Usage in logging
+Yii::info(json_encode(HidingFieldsForLogs::mask($requestData)), 'api_request');
+\\\`\\\`\\\`
+
+## API Request Rate Limiting Awareness
+
+When integrating with external APIs that have rate limits:
+
+\\\`\\\`\\\`php
+class ApiRequestCounter
+{
+    private int $count = 0;
+    private int $limit;
+    private float $windowStart;
+
+    public function __construct(int $limitPerMinute = 60)
+    {
+        $this->limit = $limitPerMinute;
+        $this->windowStart = microtime(true);
+    }
+
+    public function canRequest(): bool
+    {
+        $elapsed = microtime(true) - $this->windowStart;
+        if ($elapsed >= 60) {
+            $this->count = 0;
+            $this->windowStart = microtime(true);
+        }
+        return $this->count < $this->limit;
+    }
+
+    public function recordRequest(): void
+    {
+        $this->count++;
+    }
+
+    public function waitIfNeeded(): void
+    {
+        if (!$this->canRequest()) {
+            $remaining = 60 - (microtime(true) - $this->windowStart);
+            if ($remaining > 0) usleep((int)($remaining * 1_000_000));
+            $this->count = 0;
+            $this->windowStart = microtime(true);
+        }
+    }
+}
+\\\`\\\`\\\`
+`;

@@ -15,6 +15,8 @@ export function registerPrompts(server: McpServer): void {
           "payment_gateway",
           "monitoring",
           "integration",
+          "accounting",
+          "e_invoicing",
           "reporting",
           "notification",
         ])
@@ -41,6 +43,8 @@ Please help me build this addon step by step. Use the splynx-addons MCP server t
    - payment_gateway: entry_points, payment, portal, hooks
    - monitoring: entry_points, hooks, redis
    - integration: entry_points, hooks, mysql or sqlite
+   - accounting: entry_points, hooks, mysql, sqlite, redis (read "accounting-addon" resource)
+   - e_invoicing: entry_points, hooks, sqlite, redis (read "e-invoicing-addon" resource)
    - reporting: entry_points, mysql
    - notification: hooks, redis, browser communication
 3. Write all generated files to disk.
@@ -56,6 +60,8 @@ Please help me build this addon step by step. Use the splynx-addons MCP server t
    - "payment-addon" for payment gateway specifics
    - "database" for MySQL/SQLite
    - "views" for Twig templates
+   - "e-invoicing-addon" for government tax authority submission
+   - "advanced-patterns" for ActionInterface, dual DB, cron pipelines, bank import, fee registries, console-only addons
 
 Generate the module_name from the addon_name (lowercase, underscores, prefixed with "splynx_", max 32 chars).
 Generate the base_url from the module_name (replace underscores with hyphens, prefix with "/").
@@ -135,6 +141,196 @@ Please:
 5. Update config.json with payment gateway API credentials (use encrypted type for keys/secrets).
 6. Create portal views for the payment flow.
 7. Explain the financial handler setup at /var/www/splynx/system/external_handlers/finance/charge/.`,
+          },
+        },
+      ],
+    })
+  );
+
+  server.prompt(
+    "create_accounting_addon",
+    "Step-by-step guided workflow for creating an accounting integration addon (like QuickBooks or Xero)",
+    {
+      addon_name: z
+        .string()
+        .describe(
+          'Human-readable addon name (e.g., "Splynx QuickBooks")'
+        ),
+      provider_name: z
+        .string()
+        .describe(
+          'External accounting provider name (e.g., "QuickBooks", "Xero", "SageOne")'
+        ),
+      description: z.string().describe("What the addon does"),
+    },
+    async (params) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `I need to create an accounting integration addon: "${params.addon_name}"
+Provider: ${params.provider_name}
+Description: ${params.description}
+
+Please help me build this accounting addon step by step. Use the splynx-addons MCP server tools and resources.
+
+## Instructions
+
+1. First, read the "accounting-addon" resource for the complete accounting addon architecture guide.
+2. Also read "addon-architecture", "install-controller", and "hooks" resources.
+3. Use the "scaffold_addon" tool to generate the base skeleton with features: entry_points, hooks, mysql, sqlite, redis.
+4. Then create the accounting-specific structure:
+
+### OAuth2 Authentication
+- components/${params.provider_name.toLowerCase()}/oauth2/AuthService.php - token management
+- components/${params.provider_name.toLowerCase()}/oauth2/AccessToken.php - token value object
+- components/${params.provider_name.toLowerCase()}/AccountingApiCaller.php - API proxy with rate limiting
+- components/${params.provider_name.toLowerCase()}/exceptions/ - ApiAuthException, ApiCallException, ApiCallLimitException
+- controllers/AuthController.php - OAuth connect/disconnect flow
+- helpers/AuthTokenHelper.php - Redis token storage
+
+### Sync Engine
+- models/SyncService.php - central sync orchestrator
+- commands/SyncController.php - cron-driven sync commands
+- commands/ToolsController.php - manual sync/reset tools
+- commands/BaseCommandController.php - shared base
+
+### Three-Layer Data Model
+- models/accounting/ - BaseAccounting, BaseAccountingMapping, AccountingCustomers/Invoices/Payments/CreditNotes/Categories/TaxRates/BankAccounts
+- models/pair/ - BasePair, PairCustomer, PairInvoice, PairPayment, PairCreditNote, PairCollection, CustomersManualPairing
+- models/splynx/ - Customer, Invoice, Payment, CreditNote wrappers
+
+### Rate Limiting & Process Control
+- models/limit/ - ApiLimitInterface, ApiLimit, ApiLimitCounter, ApiLimitService
+- models/PidRestriction.php - process locking
+
+### Bootstrap & Config
+- base/Bootstrap.php - DI container wiring (BootstrapInterface)
+- config/common.php - shared config with Bootstrap registration and multi-log targets
+- config/config.json - 4 blocks: api, accounting_api, synchronization, cron
+- components/ValidateConfig.php - pre-sync validation
+- components/LicenseChecker.php - ionCube license check
+
+### Views & Entry Points
+- views/auth/ - OAuth form and result
+- views/config/ - category/tax/bank mapping
+- views/entry-point/ - JS injection into Splynx Finance config pages
+- views/manual-pairing-customers/ - manual customer pairing UI
+- views/site/ - dashboard with sync status and log tailing
+- controllers/ManualPairingCustomersController.php
+- controllers/ConfigController.php
+
+### Cron & Build
+- defaults/etc/cron.d/ - cron job definition
+- build/config.php - ionCube, web symlink, package conflicts
+
+5. InstallController should:
+   - Create splynx-accounting marker file
+   - Initialize accounting tables for customers, invoices, credit notes, payments
+   - Create "${params.provider_name}" payment method
+   - Set random cron launch time
+   - Register API permissions for: Customer, CustomerInfo, CustomerBilling, Invoices, Payments, Transactions, BankStatements, CreditNotes
+   - Register entry points: categories config, bank accounts config, tax rates config, finance menu, dashboard notifications
+
+6. Generate migrations for: customer, invoice, credit_note (pair tables), pid_restriction, api_limit, api_limit_counter, customers_manual_pairing
+
+Generate the module_name from addon_name (lowercase, underscores, prefixed with "splynx_", max 32 chars).`,
+          },
+        },
+      ],
+    })
+  );
+
+  server.prompt(
+    "create_einvoicing_addon",
+    "Step-by-step guided workflow for creating an e-invoicing addon that submits documents to a government tax authority",
+    {
+      addon_name: z
+        .string()
+        .describe(
+          'Human-readable addon name (e.g., "Splynx AADE myDATA")'
+        ),
+      country_name: z
+        .string()
+        .describe(
+          'Country name (e.g., "Greece", "Spain")'
+        ),
+      authority_name: z
+        .string()
+        .describe(
+          'Government tax authority name (e.g., "AADE myDATA", "AEAT Verifactu")'
+        ),
+      auth_type: z
+        .enum(["api_key", "certificate"])
+        .describe("Authentication type: api_key (header-based) or certificate (mutual TLS/SOAP)"),
+      api_type: z
+        .enum(["rest_xml", "soap"])
+        .describe("API type: rest_xml (REST with XML body) or soap (SOAP with WSDL)"),
+      description: z.string().describe("What the addon does"),
+    },
+    async (params) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `I need to create an e-invoicing addon: "${params.addon_name}"
+Country: ${params.country_name}
+Authority: ${params.authority_name}
+Auth type: ${params.auth_type}
+API type: ${params.api_type}
+Description: ${params.description}
+
+Please help me build this e-invoicing addon step by step. Use the splynx-addons MCP server tools and resources.
+
+## Instructions
+
+1. First, read the "e-invoicing-addon" resource for the complete e-invoicing architecture guide.
+2. Also read "addon-architecture", "install-controller", and "hooks" resources.
+3. Use the "scaffold_addon" tool to generate the base skeleton with features: entry_points, hooks, sqlite, redis.
+4. Then create the e-invoicing-specific structure:
+
+### Government API Integration
+- components/<provider>/ with API client, XML service, error registry
+- Auth: ${params.auth_type === 'api_key' ? 'API key headers on every request' : 'Digital certificate (PFX/PEM) with SOAP mutual TLS'}
+- API: ${params.api_type === 'rest_xml' ? 'REST with XML body (use Sabre XML library)' : 'SOAP with WSDL (use DOMDocument + xmlseclibs for signing)'}
+- ValidateConfig.php for pre-sync validation
+- Mappings.php for government tax/type codes
+
+### Tracker System
+- models/trackers/ with Trackable interface, BaseTracker, InvoiceTracker, CreditNoteTracker
+- SHA-256 hash-based change detection on invoice items
+
+### Manager Pattern
+- models/managers/ with BaseManager, InvoiceManager, CreditNoteManager
+- Document lifecycle: add (submit XML) -> update (re-submit or cancel+resubmit) -> cancel
+
+### EInvoicing Records & Mappings
+- models/einvoicing/ for DB records and mapping tables
+- config/InvoiceTypeMap.php for dual mapping (company vs. private person)
+
+### Sync Engine
+- models/SyncService.php orchestrating 6 phases: add/update/cancel for invoices + credit notes
+- Background task processing with progress tracking
+- Cron-driven sync every 2-4 hours
+
+### Views
+- Manual sync dashboard with progress bar and log tailing
+- Invoice type mapping config (company vs. private person)
+- Dashboard notifications for errors and incomplete mappings
+
+5. InstallController should:
+   - Create splynx-eInvoicing marker file
+   - Initialize einvoicing tables for invoices and credit notes
+   - Register API permissions for Customer, Invoices (with update for QR), CreditNotes (with update)
+   - Register additional fields: country on customers, qr_code_url (readonly) on invoices and credit_notes
+   - Register entry points: Finance menu link, dashboard notification
+   - afterAction triggers einvoicing setup: tables, tax rates, payment methods, categories
+
+6. Generate migrations for: background, invoice_tracker, credit_note_tracker, invoice_type_map
+
+Generate the module_name from addon_name (lowercase, underscores, prefixed with "splynx_", max 32 chars).`,
           },
         },
       ],
